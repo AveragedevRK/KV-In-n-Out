@@ -10,6 +10,8 @@ export default defineConfig(({ mode }) => {
         host: '0.0.0.0',
         allowedHosts: true
       },
+        
+      allowedHosts: true
       plugins: [react()],
       define: {
         'process.env.API_KEY': JSON.stringify(env.GEMINI_API_KEY),
