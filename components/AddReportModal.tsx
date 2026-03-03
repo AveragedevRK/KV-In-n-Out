@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { X, Save, Wallet, CreditCard, LayoutDashboard, Plus, Trash2, Calendar, AlertTriangle } from 'lucide-react';
-import { FinancialData, ShippingBreakdown } from '../types';
+import { X, Save, Wallet, CreditCard, LayoutDashboard, Plus, Trash2, Calendar, AlertTriangle, Building2, Lock, CheckCircle2 } from 'lucide-react';
+import { FinancialData, ShippingBreakdown, PayoutBreakdown } from '../types';
+import { db } from '../firebase';
+import { collection, addDoc, getDocs, onSnapshot, query, orderBy } from 'firebase/firestore';
 
 interface AddReportModalProps {
   isOpen: boolean;
@@ -11,6 +13,16 @@ interface AddReportModalProps {
 
 const LOCAL_STORAGE_KEY = 'kv_report_draft';
 
+// Default accounts to seed if DB is empty
+const DEFAULT_ACCOUNTS = [
+  "Vegan Earth",
+  "Chito's Toys",
+  "Playing Gorilla",
+  "Urban VII",
+  "Aquarios",
+  "Green Illusions"
+];
+
 export const AddReportModal: React.FC<AddReportModalProps> = ({
   isOpen,
   onClose,
@@ -20,6 +32,13 @@ export const AddReportModal: React.FC<AddReportModalProps> = ({
   const [formData, setFormData] = useState<FinancialData>(initialData);
   const [showConfirm, setShowConfirm] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  
+  // Account Management State
+  const [availableAccounts, setAvailableAccounts] = useState<{id: string, name: string}[]>([]);
+  const [showAccountCreator, setShowAccountCreator] = useState(false);
+  const [newAccountName, setNewAccountName] = useState('');
+  const [securityCode, setSecurityCode] = useState('');
+  const [accountError, setAccountError] = useState('');
 
   // Load persistence on open
   useEffect(() => {
@@ -27,16 +46,62 @@ export const AddReportModal: React.FC<AddReportModalProps> = ({
       const savedDraft = localStorage.getItem(LOCAL_STORAGE_KEY);
       if (savedDraft) {
         try {
-          setFormData(JSON.parse(savedDraft));
+          const parsed = JSON.parse(savedDraft);
+          // Ensure payoutBreakdown exists if loading from an old draft
+          if (!parsed.payoutBreakdown) {
+             parsed.payoutBreakdown = { accounts: [], total: parsed.expectedWeeklyPayout || 0 };
+          }
+          setFormData(parsed);
         } catch (e) {
           console.error("Failed to parse draft", e);
           setFormData(initialData);
         }
       } else {
-        setFormData(initialData);
+        // Ensure payoutBreakdown exists for initial data
+        const dataWithBreakdown = { ...initialData };
+        if (!dataWithBreakdown.payoutBreakdown) {
+            dataWithBreakdown.payoutBreakdown = { 
+                accounts: [], 
+                total: dataWithBreakdown.expectedWeeklyPayout || 0 
+            };
+        }
+        setFormData(dataWithBreakdown);
       }
     }
   }, [isOpen, initialData]);
+
+  // Fetch Accounts & Seed if empty
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const accountsRef = collection(db, 'payout_accounts');
+    
+    // Check and seed if necessary (one-time check on mount/open)
+    const checkAndSeed = async () => {
+        try {
+            const snap = await getDocs(accountsRef);
+            if (snap.empty) {
+                console.log("Seeding default accounts...");
+                await Promise.all(DEFAULT_ACCOUNTS.map(name => addDoc(accountsRef, { name })));
+            }
+        } catch (err) {
+            console.error("Error seeding accounts:", err);
+        }
+    };
+    checkAndSeed();
+
+    // Subscribe to changes
+    const q = query(accountsRef, orderBy('name'));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+        const accounts = snapshot.docs.map(doc => ({
+            id: doc.id,
+            name: doc.data().name as string
+        }));
+        setAvailableAccounts(accounts);
+    });
+
+    return () => unsubscribe();
+  }, [isOpen]);
 
   // Persist changes
   useEffect(() => {
@@ -44,6 +109,28 @@ export const AddReportModal: React.FC<AddReportModalProps> = ({
         localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(formData));
     }
   }, [formData, isOpen]);
+
+  // Auto-calculate Daily Earning whenever Date or Payout Total changes
+  useEffect(() => {
+    if (isOpen && formData.date && formData.payoutBreakdown) {
+        const date = new Date(formData.date);
+        let dayIndex = date.getDay(); // 0=Sun, 1=Mon...
+        if (dayIndex === 0) dayIndex = 7; // Treat Sunday as 7th day
+        
+        // Logic: Wednesday (3) -> 2 days passed. Mon(1) -> 0 days passed (use 1 as min divisor).
+        // Divisor = DayIndex - 1. 
+        const daysPassed = Math.max(1, dayIndex - 1);
+        
+        const calculatedDaily = formData.payoutBreakdown.total / daysPassed;
+        
+        if (formData.expectedDailyEarning !== calculatedDaily) {
+            setFormData(prev => ({
+                ...prev,
+                expectedDailyEarning: calculatedDaily
+            }));
+        }
+    }
+  }, [formData.date, formData.payoutBreakdown, isOpen]);
 
   const handleChange = (field: keyof FinancialData, value: string) => {
     setFormData(prev => ({
@@ -66,6 +153,14 @@ export const AddReportModal: React.FC<AddReportModalProps> = ({
 
       return { ...prev, ...updates };
     });
+  };
+
+  const handlePayoutChange = (newBreakdown: PayoutBreakdown) => {
+      setFormData(prev => ({
+          ...prev,
+          payoutBreakdown: newBreakdown,
+          expectedWeeklyPayout: newBreakdown.total
+      }));
   };
 
   const processSave = async () => {
@@ -95,6 +190,34 @@ export const AddReportModal: React.FC<AddReportModalProps> = ({
     }
 
     processSave();
+  };
+
+  const handleCreateAccount = async () => {
+    setAccountError('');
+    if (!newAccountName.trim()) {
+        setAccountError('Account name is required');
+        return;
+    }
+    if (securityCode !== 'sudo') {
+        setAccountError('Invalid security code');
+        return;
+    }
+    
+    // Check if exists
+    if (availableAccounts.some(a => a.name.toLowerCase() === newAccountName.toLowerCase())) {
+        setAccountError('Account already exists');
+        return;
+    }
+
+    try {
+        await addDoc(collection(db, 'payout_accounts'), { name: newAccountName.trim() });
+        setShowAccountCreator(false);
+        setNewAccountName('');
+        setSecurityCode('');
+    } catch (e) {
+        console.error("Error creating account", e);
+        setAccountError('Failed to create account');
+    }
   };
 
   if (!isOpen) return null;
@@ -183,9 +306,33 @@ export const AddReportModal: React.FC<AddReportModalProps> = ({
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
               Projections
             </h3>
+            
+            <div className="mb-6">
+                <PayoutEditor 
+                    data={formData.payoutBreakdown || { accounts: [], total: 0 }} 
+                    onChange={handlePayoutChange}
+                    availableAccounts={availableAccounts}
+                    onCreateAccount={() => setShowAccountCreator(true)}
+                />
+            </div>
+
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-              <InputGroup label="Expected Daily Earning" value={formData.expectedDailyEarning} onChange={(v) => handleChange('expectedDailyEarning', v)} icon="$" />
-              <InputGroup label="Expected Weekly Payout" value={formData.expectedWeeklyPayout} onChange={(v) => handleChange('expectedWeeklyPayout', v)} icon="$" />
+              {/* Daily Earning is now Read Only / Calculated */}
+              <div className="space-y-1.5 opacity-80">
+                <label className="text-xs text-emerald-400 font-medium ml-1">Daily Earning (Calculated)</label>
+                <div className="relative group">
+                    <div className="absolute left-3 top-1/2 -translate-y-1/2 text-emerald-500 pointer-events-none">
+                    $
+                    </div>
+                    <input
+                    type="number"
+                    value={formData.expectedDailyEarning}
+                    readOnly
+                    className="w-full bg-emerald-900/10 border border-emerald-500/20 rounded-xl py-2.5 pl-9 pr-3 text-sm text-emerald-200 focus:outline-none font-mono cursor-not-allowed"
+                    />
+                </div>
+              </div>
+
               <InputGroup label="Previous Week's Payout" value={formData.previousWeeksPayout} onChange={(v) => handleChange('previousWeeksPayout', v)} icon="$" />
             </div>
           </section>
@@ -250,6 +397,62 @@ export const AddReportModal: React.FC<AddReportModalProps> = ({
         </div>
       </div>
     )}
+
+    {/* New Account Creation Modal */}
+    {showAccountCreator && (
+      <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+        <div className="absolute inset-0 bg-black/80 backdrop-blur-sm" onClick={() => setShowAccountCreator(false)}></div>
+        <div className="relative w-full max-w-sm bg-zinc-900 border border-white/10 rounded-2xl p-6 shadow-2xl animate-in fade-in zoom-in-95">
+          <div className="flex justify-between items-center mb-4">
+            <h3 className="text-lg font-medium text-white">New Account Profile</h3>
+            <button onClick={() => setShowAccountCreator(false)} className="text-zinc-500 hover:text-white"><X size={18} /></button>
+          </div>
+          
+          <div className="space-y-4">
+            <div className="space-y-1.5">
+                <label className="text-xs text-zinc-500 font-medium ml-1">Account Name</label>
+                <input 
+                    type="text"
+                    value={newAccountName}
+                    onChange={(e) => setNewAccountName(e.target.value)}
+                    className="w-full bg-black/40 border border-white/10 rounded-xl py-2.5 px-3 text-sm text-zinc-200 placeholder-zinc-700 focus:outline-none focus:border-white/20 focus:bg-white/5 transition-all"
+                    placeholder="e.g. My New Shop"
+                    autoFocus
+                />
+            </div>
+            <div className="space-y-1.5">
+                <label className="text-xs text-zinc-500 font-medium ml-1">Security Code</label>
+                <div className="relative group">
+                    <div className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500 pointer-events-none">
+                        <Lock size={14} />
+                    </div>
+                    <input 
+                        type="password"
+                        value={securityCode}
+                        onChange={(e) => setSecurityCode(e.target.value)}
+                        className="w-full bg-black/40 border border-white/10 rounded-xl py-2.5 pl-9 pr-3 text-sm text-zinc-200 placeholder-zinc-700 focus:outline-none focus:border-white/20 focus:bg-white/5 transition-all"
+                        placeholder="Required to create"
+                    />
+                </div>
+            </div>
+
+            {accountError && (
+                <div className="text-xs text-red-400 bg-red-400/10 p-2 rounded-lg border border-red-400/20">
+                    {accountError}
+                </div>
+            )}
+
+            <button 
+                onClick={handleCreateAccount}
+                className="w-full mt-2 px-4 py-2.5 rounded-xl text-sm font-medium bg-emerald-500 text-white hover:bg-emerald-600 transition-colors flex items-center justify-center gap-2"
+            >
+                <CheckCircle2 size={16} /> Create Profile
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+
     </>
   );
 };
@@ -387,6 +590,142 @@ const ShippingEditor = ({
     </div>
   );
 };
+
+// Sub-component for managing Payout Breakdown
+const PayoutEditor = ({ 
+    data, 
+    onChange,
+    availableAccounts,
+    onCreateAccount
+  }: { 
+    data: PayoutBreakdown, 
+    onChange: (newBreakdown: PayoutBreakdown) => void,
+    availableAccounts: {id: string, name: string}[],
+    onCreateAccount: () => void
+  }) => {
+    
+    // Safety check for initialization
+    const accounts = data?.accounts || [];
+    const total = data?.total || 0;
+
+    const addAccount = () => {
+      const newAccount = { id: Math.random().toString(36).substr(2, 9), name: '', amount: 0 };
+      updateData([...accounts, newAccount]);
+    };
+  
+    const updateAccount = (id: string, field: 'name' | 'amount', value: string) => {
+      const updatedAccounts = accounts.map(a => {
+        if (a.id === id) {
+          return { 
+            ...a, 
+            [field]: field === 'amount' ? (parseFloat(value) || 0) : value 
+          };
+        }
+        return a;
+      });
+      updateData(updatedAccounts);
+    };
+  
+    const removeAccount = (id: string) => {
+      updateData(accounts.filter(a => a.id !== id));
+    };
+
+    const updateData = (newAccounts: any[]) => {
+        const newTotal = newAccounts.reduce((sum, a) => sum + a.amount, 0);
+        onChange({ accounts: newAccounts, total: newTotal });
+    };
+  
+    return (
+      <div className="p-4 rounded-xl bg-white/5 border border-white/5">
+        <div className="flex justify-between items-center mb-3">
+          <label className="text-xs text-zinc-400 uppercase tracking-wide">Expected Weekly Payout Breakdown</label>
+          <div className="flex gap-2">
+            <button 
+                type="button" 
+                onClick={onCreateAccount}
+                className="text-xs flex items-center gap-1 text-zinc-400 hover:text-white transition-colors font-medium px-2 py-1 rounded bg-white/5 hover:bg-white/10"
+            >
+                <Plus size={10} /> Create Profile
+            </button>
+            <button 
+                type="button" 
+                onClick={addAccount}
+                className="text-xs flex items-center gap-1 text-emerald-400 hover:text-emerald-300 transition-colors font-medium px-2 py-1 rounded bg-emerald-400/10 hover:bg-emerald-400/20"
+            >
+                <Plus size={12} /> Add Account
+            </button>
+          </div>
+        </div>
+        
+        <div className="space-y-3">
+            {accounts.length === 0 && (
+                <div className="text-center py-4 text-xs text-zinc-600 italic">No accounts added yet. Add one to set the weekly payout.</div>
+            )}
+          {accounts.map((account) => (
+            <div key={account.id} className="flex gap-3 items-end animate-in fade-in slide-in-from-top-2">
+              <div className="flex-1 space-y-1">
+                <label className="text-[10px] text-zinc-500 ml-1">Account Name</label>
+                <div className="relative group">
+                  <div className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500 pointer-events-none">
+                    <Building2 size={14} />
+                  </div>
+                  <select
+                    value={account.name}
+                    onChange={(e) => updateAccount(account.id, 'name', e.target.value)}
+                    className="w-full bg-black/40 border border-white/10 rounded-xl py-2 pl-9 pr-3 text-sm text-zinc-200 focus:outline-none focus:border-white/20 focus:bg-white/5 transition-all appearance-none"
+                  >
+                    <option value="" disabled className="text-zinc-600">Select Account</option>
+                    {availableAccounts.map(opt => (
+                        <option key={opt.id} value={opt.name} className="bg-zinc-900 text-zinc-200">{opt.name}</option>
+                    ))}
+                    {/* Fallback for existing data that might not be in DB yet or legacy */}
+                    {account.name && !availableAccounts.find(a => a.name === account.name) && (
+                        <option value={account.name} className="bg-zinc-900 text-zinc-200">{account.name}</option>
+                    )}
+                  </select>
+                  <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-zinc-500">
+                     <svg width="10" height="6" viewBox="0 0 10 6" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M1 1L5 5L9 1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                  </div>
+                </div>
+              </div>
+              <div className="flex-1 space-y-1">
+                <label className="text-[10px] text-zinc-500 ml-1">Amount</label>
+                <div className="relative group">
+                  <div className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500 pointer-events-none">
+                    $
+                  </div>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={account.amount}
+                    onChange={(e) => updateAccount(account.id, 'amount', e.target.value)}
+                    onFocus={(e) => e.target.select()}
+                    className="w-full bg-black/40 border border-white/10 rounded-xl py-2 pl-7 pr-3 text-sm text-zinc-200 placeholder-zinc-700 focus:outline-none focus:border-white/20 focus:bg-white/5 transition-all font-mono"
+                    placeholder="0.00"
+                  />
+                </div>
+              </div>
+              <button 
+                type="button" 
+                onClick={() => removeAccount(account.id)}
+                className="p-2.5 rounded-xl bg-red-500/10 text-red-400 hover:bg-red-500/20 hover:text-red-300 transition-colors"
+                title="Remove Account"
+              >
+                <Trash2 size={16} />
+              </button>
+            </div>
+          ))}
+        </div>
+        
+        <div className="mt-3 pt-2 border-t border-white/5 flex justify-between items-center">
+            <span className="text-xs text-zinc-500">Total Payout</span>
+            <span className="text-sm font-mono text-zinc-200">
+                {new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(total)}
+            </span>
+        </div>
+      </div>
+    );
+  };
 
 const InputGroup = ({ 
   label, 

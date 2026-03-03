@@ -1,3 +1,4 @@
+
 export interface CardPayment {
   id: string;
   last4: string;
@@ -9,6 +10,17 @@ export interface ShippingBreakdown {
   balance: number;
 }
 
+export interface PayoutAccount {
+  id: string;
+  name: string;
+  amount: number;
+}
+
+export interface PayoutBreakdown {
+  accounts: PayoutAccount[];
+  total: number;
+}
+
 export interface FinancialData {
   date: string; // YYYY-MM-DD
   sales: number;
@@ -18,6 +30,7 @@ export interface FinancialData {
   dailyInvestment: number;
   expectedDailyEarning: number;
   expectedWeeklyPayout: number;
+  payoutBreakdown?: PayoutBreakdown; // Optional for backward compatibility
   previousWeeksPayout: number;
   shippingBreakdown: ShippingBreakdown;
 }

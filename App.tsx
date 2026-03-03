@@ -13,12 +13,13 @@ import {
   ChevronDown,
   History,
   Copy,
-  Check
+  Check,
+  Building2
 } from 'lucide-react';
 import { MetricCard, SubItem } from './components/MetricCard';
 import { Orb } from './components/Orb';
 import { AddReportModal } from './components/AddReportModal';
-import { FinancialData, ShippingBreakdown } from './types';
+import { FinancialData, ShippingBreakdown, PayoutBreakdown } from './types';
 import { db } from './firebase';
 import { collection, doc, setDoc, getDocs, getDoc, serverTimestamp } from 'firebase/firestore';
 import html2canvas from 'html2canvas';
@@ -66,7 +67,8 @@ const App: React.FC = () => {
             expectedDailyEarning: data.expectedDailyEarning,
             expectedWeeklyPayout: data.expectedWeeklyPayout,
             previousWeeksPayout: data.previousWeeksPayout,
-            shippingBreakdown: data.shippingBreakdown
+            shippingBreakdown: data.shippingBreakdown,
+            payoutBreakdown: data.payoutBreakdown
           } as FinancialData;
         });
 
@@ -108,7 +110,8 @@ const App: React.FC = () => {
             expectedDailyEarning: data.expectedDailyEarning,
             expectedWeeklyPayout: data.expectedWeeklyPayout,
             previousWeeksPayout: data.previousWeeksPayout,
-            shippingBreakdown: data.shippingBreakdown
+            shippingBreakdown: data.shippingBreakdown,
+            payoutBreakdown: data.payoutBreakdown
           } as FinancialData;
 
           setReports(prev => ({
@@ -142,7 +145,8 @@ const App: React.FC = () => {
       expectedDailyEarning: 0,
       expectedWeeklyPayout: 0,
       previousWeeksPayout: 0,
-      shippingBreakdown: { cards: [], balance: 0 }
+      shippingBreakdown: { cards: [], balance: 0 },
+      payoutBreakdown: { accounts: [], total: 0 }
     };
   }, [reports, selectedDate]);
 
@@ -236,6 +240,16 @@ const App: React.FC = () => {
     }
 
     return cardItems;
+  };
+
+  const getPayoutBreakdown = (breakdown?: PayoutBreakdown): SubItem[] => {
+      if (!breakdown || !breakdown.accounts) return [];
+      
+      return breakdown.accounts.map(acc => ({
+          icon: Building2,
+          label: acc.name || 'Account',
+          amount: acc.amount
+      }));
   };
 
   const formatDateDisplay = (dateStr: string) => {
@@ -527,6 +541,7 @@ const App: React.FC = () => {
                   icon={DollarSign}
                   iconColor="text-emerald-300/80"
                   accentColor="bg-emerald-500" 
+                  subItems={getPayoutBreakdown(currentData.payoutBreakdown)}
                 />
               </div>
               <div className="relative z-10 mt-4 md:mt-6 pt-3 md:pt-4 border-t border-white/10 flex justify-between items-center text-emerald-200/80">
