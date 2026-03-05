@@ -1,8 +1,18 @@
-import React, { useState, useEffect } from 'react';
-import { X, Save, Wallet, CreditCard, LayoutDashboard, Plus, Trash2, Calendar, AlertTriangle, Building2, Lock, CheckCircle2 } from 'lucide-react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { X, Save, Wallet, CreditCard, LayoutDashboard, Plus, Trash2, Calendar, AlertTriangle, Building2, Lock, CheckCircle2, ShieldAlert, Info } from 'lucide-react';
 import { FinancialData, ShippingBreakdown, PayoutBreakdown } from '../types';
 import { db } from '../firebase';
 import { collection, addDoc, getDocs, onSnapshot, query, orderBy } from 'firebase/firestore';
+
+interface ValidationError {
+  field: string;
+  message: string;
+}
+
+interface ValidationWarning {
+  field: string;
+  message: string;
+}
 
 interface AddReportModalProps {
   isOpen: boolean;
@@ -30,8 +40,13 @@ export const AddReportModal: React.FC<AddReportModalProps> = ({
   initialData
 }) => {
   const [formData, setFormData] = useState<FinancialData>(initialData);
-  const [showConfirm, setShowConfirm] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  
+  // Validation State
+  const [errors, setErrors] = useState<ValidationError[]>([]);
+  const [warnings, setWarnings] = useState<ValidationWarning[]>([]);
+  const [showWarningConfirm, setShowWarningConfirm] = useState(false);
+  const [hasAttemptedSubmit, setHasAttemptedSubmit] = useState(false);
   
   // Account Management State
   const [availableAccounts, setAvailableAccounts] = useState<{id: string, name: string}[]>([]);
@@ -43,6 +58,12 @@ export const AddReportModal: React.FC<AddReportModalProps> = ({
   // Load persistence on open
   useEffect(() => {
     if (isOpen) {
+      // Reset validation state
+      setErrors([]);
+      setWarnings([]);
+      setShowWarningConfirm(false);
+      setHasAttemptedSubmit(false);
+      
       const savedDraft = localStorage.getItem(LOCAL_STORAGE_KEY);
       if (savedDraft) {
         try {
@@ -163,33 +184,172 @@ export const AddReportModal: React.FC<AddReportModalProps> = ({
       }));
   };
 
+  // --- VALIDATION ---
+  const validate = useCallback((): { errors: ValidationError[], warnings: ValidationWarning[] } => {
+    const errs: ValidationError[] = [];
+    const warns: ValidationWarning[] = [];
+    const today = new Date().toISOString().split('T')[0];
+
+    // --- HARD ERRORS (block save) ---
+
+    // 1. Date must exist
+    if (!formData.date) {
+      errs.push({ field: 'date', message: 'Report date is required.' });
+    }
+
+    // 2. No negative numbers on any financial field
+    const numericFields: { key: keyof FinancialData; label: string }[] = [
+      { key: 'sales', label: 'Gross Sales' },
+      { key: 'sellingFee', label: 'Platform Fees' },
+      { key: 'cogs', label: 'COGS' },
+      { key: 'shipping', label: 'Shipping' },
+      { key: 'dailyInvestment', label: 'Daily Investment' },
+      { key: 'expectedWeeklyPayout', label: 'Weekly Payout' },
+      { key: 'previousWeeksPayout', label: "Previous Week's Payout" },
+    ];
+    for (const { key, label } of numericFields) {
+      if ((formData[key] as number) < 0) {
+        errs.push({ field: key, message: `${label} cannot be negative.` });
+      }
+    }
+
+    // 3. Shipping cards: each card must have valid last4 (4 digits) and positive amount
+    if (formData.shippingBreakdown?.cards.length > 0) {
+      formData.shippingBreakdown.cards.forEach((card, idx) => {
+        if (!card.last4 || card.last4.trim() === '') {
+          errs.push({ field: `shipping_card_${idx}_last4`, message: `Shipping card #${idx + 1} is missing the last 4 digits.` });
+        } else if (!/^\d{4}$/.test(card.last4.trim())) {
+          errs.push({ field: `shipping_card_${idx}_last4`, message: `Shipping card #${idx + 1} last 4 must be exactly 4 digits.` });
+        }
+        if (card.amount < 0) {
+          errs.push({ field: `shipping_card_${idx}_amount`, message: `Shipping card #${idx + 1} amount cannot be negative.` });
+        }
+        if (card.amount === 0) {
+          errs.push({ field: `shipping_card_${idx}_amount`, message: `Shipping card #${idx + 1} has zero amount. Remove it or enter an amount.` });
+        }
+      });
+    }
+
+    // 4. Shipping balance cannot be negative
+    if (formData.shippingBreakdown && formData.shippingBreakdown.balance < 0) {
+      errs.push({ field: 'shipping_balance', message: 'Shipping account balance cannot be negative.' });
+    }
+
+    // 5. Payout accounts: each must have a name selected if amount > 0
+    if (formData.payoutBreakdown?.accounts.length > 0) {
+      formData.payoutBreakdown.accounts.forEach((acct, idx) => {
+        if (!acct.name || acct.name.trim() === '') {
+          errs.push({ field: `payout_${idx}_name`, message: `Payout account #${idx + 1} needs an account selected.` });
+        }
+        if (acct.amount < 0) {
+          errs.push({ field: `payout_${idx}_amount`, message: `Payout account #${idx + 1} amount cannot be negative.` });
+        }
+      });
+    }
+
+    // 6. All financial values cannot be zero (empty report)
+    const allZero = formData.sales === 0 && formData.sellingFee === 0 && formData.cogs === 0 && 
+                    formData.shipping === 0 && formData.dailyInvestment === 0 && 
+                    (formData.payoutBreakdown?.total || 0) === 0 && formData.previousWeeksPayout === 0;
+    if (allZero) {
+      errs.push({ field: 'all', message: 'Cannot save an empty report. Enter at least one value.' });
+    }
+
+    // --- SOFT WARNINGS (confirmation popup) ---
+
+    // 1. Date is in the future
+    if (formData.date && formData.date > today) {
+      warns.push({ field: 'date', message: `Report date (${formData.date}) is in the future.` });
+    }
+
+    // 2. Date is not today (but not future)
+    if (formData.date && formData.date !== today && formData.date < today) {
+      warns.push({ field: 'date', message: `Report date (${formData.date}) is not today.` });
+    }
+
+    // 3. Selling fees exceed sales
+    if (formData.sales > 0 && formData.sellingFee > formData.sales) {
+      warns.push({ field: 'sellingFee', message: `Platform Fees ($${formData.sellingFee.toFixed(2)}) exceed Gross Sales ($${formData.sales.toFixed(2)}).` });
+    }
+
+    // 4. COGS exceeds sales
+    if (formData.sales > 0 && formData.cogs > formData.sales) {
+      warns.push({ field: 'cogs', message: `COGS ($${formData.cogs.toFixed(2)}) exceeds Gross Sales ($${formData.sales.toFixed(2)}).` });
+    }
+
+    // 5. Net profit is negative
+    const netProfit = formData.sales - (formData.sellingFee + formData.cogs + formData.shipping);
+    if (formData.sales > 0 && netProfit < 0) {
+      warns.push({ field: 'profit', message: `Net profit is negative ($${netProfit.toFixed(2)}). Total costs exceed sales.` });
+    }
+
+    // 6. Duplicate payout accounts
+    if (formData.payoutBreakdown?.accounts.length > 1) {
+      const names = formData.payoutBreakdown.accounts.filter(a => a.name).map(a => a.name.toLowerCase());
+      const dupes = names.filter((name, i) => names.indexOf(name) !== i);
+      if (dupes.length > 0) {
+        const uniqueDupes = [...new Set(dupes)];
+        warns.push({ field: 'payout_dupe', message: `Duplicate payout account(s): ${uniqueDupes.join(', ')}. Is this intentional?` });
+      }
+    }
+
+    // 7. Unusually large single value (> $50,000)
+    const LARGE_THRESHOLD = 50000;
+    for (const { key, label } of numericFields) {
+      if ((formData[key] as number) > LARGE_THRESHOLD) {
+        warns.push({ field: key, message: `${label} is unusually large ($${(formData[key] as number).toFixed(2)}). Double-check this value.` });
+      }
+    }
+
+    return { errors: errs, warnings: warns };
+  }, [formData]);
+
+  // Re-validate on form change if user already attempted submit (live feedback)
+  useEffect(() => {
+    if (hasAttemptedSubmit) {
+      const { errors: newErrors } = validate();
+      setErrors(newErrors);
+    }
+  }, [formData, hasAttemptedSubmit, validate]);
+
   const processSave = async () => {
     setIsSaving(true);
     try {
       await onSave(formData);
-      // Only remove if successful
       localStorage.removeItem(LOCAL_STORAGE_KEY);
       onClose();
     } catch (e) {
       console.error("Save failed in modal", e);
-      // Stay open if failed
     } finally {
       setIsSaving(false);
-      setShowConfirm(false); // Close confirm modal if it was open
+      setShowWarningConfirm(false);
     }
   };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    setHasAttemptedSubmit(true);
     
-    // Check Date
-    const today = new Date().toISOString().split('T')[0];
-    if (formData.date !== today) {
-      setShowConfirm(true);
+    const { errors: newErrors, warnings: newWarnings } = validate();
+    setErrors(newErrors);
+    setWarnings(newWarnings);
+
+    // Block on hard errors
+    if (newErrors.length > 0) {
+      return;
+    }
+
+    // Show warnings confirmation if any
+    if (newWarnings.length > 0) {
+      setShowWarningConfirm(true);
       return;
     }
 
     processSave();
+  };
+
+  const getFieldError = (field: string): string | undefined => {
+    return errors.find(e => e.field === field)?.message;
   };
 
   const handleCreateAccount = async () => {
@@ -249,22 +409,47 @@ export const AddReportModal: React.FC<AddReportModalProps> = ({
 
         <form onSubmit={handleSubmit} className="space-y-8">
           
+          {/* Validation Error Summary */}
+          {hasAttemptedSubmit && errors.length > 0 && (
+            <div className="p-4 rounded-xl bg-red-500/10 border border-red-500/20 animate-in fade-in slide-in-from-top-2">
+              <div className="flex items-start gap-3">
+                <ShieldAlert className="text-red-400 shrink-0 mt-0.5" size={18} />
+                <div className="space-y-1.5 flex-1">
+                  <p className="text-sm font-medium text-red-300">Please fix the following errors before saving:</p>
+                  <ul className="space-y-1">
+                    {errors.map((err, i) => (
+                      <li key={i} className="text-xs text-red-400/80 flex items-start gap-1.5">
+                        <span className="text-red-500 mt-0.5 shrink-0">&#x2022;</span>
+                        {err.message}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Section: Date */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="space-y-1.5">
-              <label className="text-xs text-zinc-500 font-medium ml-1">Report Date</label>
+              <label className={`text-xs font-medium ml-1 ${getFieldError('date') ? 'text-red-400' : 'text-zinc-500'}`}>Report Date</label>
               <div className="relative group">
-                <div className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500 pointer-events-none">
+                <div className={`absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none ${getFieldError('date') ? 'text-red-400' : 'text-zinc-500'}`}>
                   <Calendar size={16} />
                 </div>
                 <input
                   type="date"
                   value={formData.date}
                   onChange={(e) => handleChange('date', e.target.value)}
-                  className="w-full bg-black/40 border border-white/10 rounded-xl py-2.5 pl-9 pr-3 text-sm text-zinc-200 placeholder-zinc-700 focus:outline-none focus:border-white/20 focus:bg-white/5 focus:ring-1 focus:ring-white/10 transition-all font-sans"
+                  className={`w-full bg-black/40 border rounded-xl py-2.5 pl-9 pr-3 text-sm text-zinc-200 placeholder-zinc-700 focus:outline-none focus:bg-white/5 focus:ring-1 transition-all font-sans ${
+                    getFieldError('date') 
+                      ? 'border-red-500/50 focus:border-red-500/70 focus:ring-red-500/20' 
+                      : 'border-white/10 focus:border-white/20 focus:ring-white/10'
+                  }`}
                   required
                 />
               </div>
+              {getFieldError('date') && <p className="text-[10px] text-red-400 ml-1">{getFieldError('date')}</p>}
             </div>
           </div>
 
@@ -275,9 +460,9 @@ export const AddReportModal: React.FC<AddReportModalProps> = ({
               Operations P&L
             </h3>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
-              <InputGroup label="Gross Sales" value={formData.sales} onChange={(v) => handleChange('sales', v)} icon="$" />
-              <InputGroup label="Platform Fees" value={formData.sellingFee} onChange={(v) => handleChange('sellingFee', v)} icon="-" />
-              <InputGroup label="Cost of Goods (COGS)" value={formData.cogs} onChange={(v) => handleChange('cogs', v)} icon="-" />
+              <InputGroup label="Gross Sales" value={formData.sales} onChange={(v) => handleChange('sales', v)} icon="$" error={getFieldError('sales')} />
+              <InputGroup label="Platform Fees" value={formData.sellingFee} onChange={(v) => handleChange('sellingFee', v)} icon="-" error={getFieldError('sellingFee')} />
+              <InputGroup label="Cost of Goods (COGS)" value={formData.cogs} onChange={(v) => handleChange('cogs', v)} icon="-" error={getFieldError('cogs')} />
             </div>
             
             {/* Shipping Breakdown */}
@@ -286,6 +471,7 @@ export const AddReportModal: React.FC<AddReportModalProps> = ({
               data={formData.shippingBreakdown}
               total={formData.shipping}
               onChange={handleShippingChange}
+              errors={errors}
             />
           </section>
 
@@ -296,7 +482,7 @@ export const AddReportModal: React.FC<AddReportModalProps> = ({
               Daily Expenditure
             </h3>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
-               <InputGroup label="Daily Investment" value={formData.dailyInvestment} onChange={(v) => handleChange('dailyInvestment', v)} icon="$" />
+               <InputGroup label="Daily Investment" value={formData.dailyInvestment} onChange={(v) => handleChange('dailyInvestment', v)} icon="$" error={getFieldError('dailyInvestment')} />
             </div>
           </section>
 
@@ -313,6 +499,7 @@ export const AddReportModal: React.FC<AddReportModalProps> = ({
                     onChange={handlePayoutChange}
                     availableAccounts={availableAccounts}
                     onCreateAccount={() => setShowAccountCreator(true)}
+                    errors={errors}
                 />
             </div>
 
@@ -333,7 +520,7 @@ export const AddReportModal: React.FC<AddReportModalProps> = ({
                 </div>
               </div>
 
-              <InputGroup label="Previous Week's Payout" value={formData.previousWeeksPayout} onChange={(v) => handleChange('previousWeeksPayout', v)} icon="$" />
+              <InputGroup label="Previous Week's Payout" value={formData.previousWeeksPayout} onChange={(v) => handleChange('previousWeeksPayout', v)} icon="$" error={getFieldError('previousWeeksPayout')} />
             </div>
           </section>
 
@@ -348,8 +535,12 @@ export const AddReportModal: React.FC<AddReportModalProps> = ({
              </button>
              <button 
                type="submit"
-               disabled={isSaving}
-               className="px-6 py-2.5 rounded-xl text-sm font-medium bg-white text-black hover:bg-zinc-200 transition-colors flex items-center gap-2 shadow-[0_0_20px_rgba(255,255,255,0.1)] disabled:opacity-50 disabled:cursor-not-allowed"
+               disabled={isSaving || (hasAttemptedSubmit && errors.length > 0)}
+               className={`px-6 py-2.5 rounded-xl text-sm font-medium transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed ${
+                 hasAttemptedSubmit && errors.length > 0
+                   ? 'bg-zinc-700 text-zinc-400 cursor-not-allowed'
+                   : 'bg-white text-black hover:bg-zinc-200 shadow-[0_0_20px_rgba(255,255,255,0.1)]'
+               }`}
              >
                {isSaving ? (
                  <span className="w-4 h-4 border-2 border-zinc-400 border-t-zinc-800 rounded-full animate-spin"></span>
@@ -362,35 +553,41 @@ export const AddReportModal: React.FC<AddReportModalProps> = ({
       </div>
     </div>
     
-    {/* Confirmation Overlay Modal */}
-    {showConfirm && (
+    {/* Warnings Confirmation Modal */}
+    {showWarningConfirm && warnings.length > 0 && (
       <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
-        <div className="absolute inset-0 bg-black/80 backdrop-blur-sm" onClick={() => setShowConfirm(false)}></div>
-        <div className="relative w-full max-w-md bg-zinc-900 border border-white/10 rounded-2xl p-6 shadow-2xl animate-in fade-in zoom-in-95">
+        <div className="absolute inset-0 bg-black/80 backdrop-blur-sm" onClick={() => setShowWarningConfirm(false)}></div>
+        <div className="relative w-full max-w-lg bg-zinc-900 border border-yellow-500/20 rounded-2xl p-6 shadow-2xl animate-in fade-in zoom-in-95">
           <div className="flex flex-col items-center text-center space-y-4">
             <div className="p-3 bg-yellow-500/10 rounded-full border border-yellow-500/20">
               <AlertTriangle className="text-yellow-500" size={32} />
             </div>
-            <h3 className="text-lg font-medium text-white">Check Report Date</h3>
-            <p className="text-zinc-400 text-sm">
-              You are about to save a report for <span className="text-white font-mono">{formData.date}</span>, which is not today's date.
-              <br /><br />
-              Are you sure you want to proceed?
+            <h3 className="text-lg font-medium text-white">Review Before Saving</h3>
+            <div className="w-full text-left space-y-2 max-h-48 overflow-y-auto custom-scrollbar">
+              {warnings.map((warn, i) => (
+                <div key={i} className="flex items-start gap-2.5 p-2.5 rounded-lg bg-yellow-500/5 border border-yellow-500/10">
+                  <Info className="text-yellow-500 shrink-0 mt-0.5" size={14} />
+                  <p className="text-xs text-yellow-200/80">{warn.message}</p>
+                </div>
+              ))}
+            </div>
+            <p className="text-zinc-500 text-xs">
+              {warnings.length === 1 ? 'This issue was' : `These ${warnings.length} issues were`} detected. Do you still want to save?
             </p>
             <div className="flex gap-3 w-full pt-2">
               <button 
-                onClick={() => setShowConfirm(false)}
+                onClick={() => setShowWarningConfirm(false)}
                 className="flex-1 px-4 py-2.5 rounded-xl text-sm font-medium bg-zinc-800 text-zinc-300 hover:bg-zinc-700 hover:text-white transition-colors"
                 disabled={isSaving}
               >
-                Go Back
+                Go Back & Fix
               </button>
               <button 
                 onClick={processSave}
-                className="flex-1 px-4 py-2.5 rounded-xl text-sm font-medium bg-white text-black hover:bg-zinc-200 transition-colors"
+                className="flex-1 px-4 py-2.5 rounded-xl text-sm font-medium bg-yellow-600 text-white hover:bg-yellow-700 transition-colors"
                 disabled={isSaving}
               >
-                {isSaving ? 'Saving...' : 'Yes, Save'}
+                {isSaving ? 'Saving...' : 'Save Anyway'}
               </button>
             </div>
           </div>
@@ -462,13 +659,16 @@ const ShippingEditor = ({
   title, 
   data, 
   onChange, 
-  total 
+  total,
+  errors = []
 }: { 
   title: string, 
   data: ShippingBreakdown, 
   onChange: (newBreakdown: ShippingBreakdown) => void,
-  total: number
+  total: number,
+  errors?: ValidationError[]
 }) => {
+  const getErr = (field: string) => errors.find(e => e.field === field)?.message;
   const addCard = () => {
     const newCard = { id: Math.random().toString(36).substr(2, 9), last4: '', amount: 0 };
     onChange({ ...data, cards: [...data.cards, newCard] });
@@ -509,28 +709,34 @@ const ShippingEditor = ({
       </div>
       
       <div className="space-y-3">
-        {data.cards.map((card, index) => (
-          <div key={card.id} className="flex gap-3 items-end animate-in fade-in slide-in-from-top-2">
+        {data.cards.map((card, index) => {
+          const last4Err = getErr(`shipping_card_${index}_last4`);
+          const amtErr = getErr(`shipping_card_${index}_amount`);
+          return (
+          <div key={card.id} className="space-y-1 animate-in fade-in slide-in-from-top-2">
+            <div className="flex gap-3 items-end">
             <div className="flex-1 space-y-1">
-              <label className="text-[10px] text-zinc-500 ml-1">Card Last 4</label>
+              <label className={`text-[10px] ml-1 ${last4Err ? 'text-red-400' : 'text-zinc-500'}`}>Card Last 4</label>
               <div className="relative group">
-                <div className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500 pointer-events-none">
+                <div className={`absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none ${last4Err ? 'text-red-400' : 'text-zinc-500'}`}>
                   <CreditCard size={14} />
                 </div>
                 <input
                   type="text"
                   maxLength={4}
                   value={card.last4}
-                  onChange={(e) => updateCard(card.id, 'last4', e.target.value)}
-                  className="w-full bg-black/40 border border-white/10 rounded-xl py-2 pl-9 pr-3 text-sm text-zinc-200 placeholder-zinc-700 focus:outline-none focus:border-white/20 focus:bg-white/5 transition-all font-mono"
+                  onChange={(e) => updateCard(card.id, 'last4', e.target.value.replace(/\D/g, ''))}
+                  className={`w-full bg-black/40 border rounded-xl py-2 pl-9 pr-3 text-sm text-zinc-200 placeholder-zinc-700 focus:outline-none focus:bg-white/5 transition-all font-mono ${
+                    last4Err ? 'border-red-500/50 focus:border-red-500/70' : 'border-white/10 focus:border-white/20'
+                  }`}
                   placeholder="0000"
                 />
               </div>
             </div>
             <div className="flex-1 space-y-1">
-              <label className="text-[10px] text-zinc-500 ml-1">Amount</label>
+              <label className={`text-[10px] ml-1 ${amtErr ? 'text-red-400' : 'text-zinc-500'}`}>Amount</label>
               <div className="relative group">
-                <div className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500 pointer-events-none">
+                <div className={`absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none ${amtErr ? 'text-red-400' : 'text-zinc-500'}`}>
                   $
                 </div>
                 <input
@@ -539,7 +745,9 @@ const ShippingEditor = ({
                   value={card.amount}
                   onChange={(e) => updateCard(card.id, 'amount', e.target.value)}
                   onFocus={(e) => e.target.select()}
-                  className="w-full bg-black/40 border border-white/10 rounded-xl py-2 pl-7 pr-3 text-sm text-zinc-200 placeholder-zinc-700 focus:outline-none focus:border-white/20 focus:bg-white/5 transition-all font-mono"
+                  className={`w-full bg-black/40 border rounded-xl py-2 pl-7 pr-3 text-sm text-zinc-200 placeholder-zinc-700 focus:outline-none focus:bg-white/5 transition-all font-mono ${
+                    amtErr ? 'border-red-500/50 focus:border-red-500/70' : 'border-white/10 focus:border-white/20'
+                  }`}
                   placeholder="0.00"
                 />
               </div>
@@ -552,20 +760,26 @@ const ShippingEditor = ({
             >
               <Trash2 size={16} />
             </button>
+            </div>
+            {(last4Err || amtErr) && (
+              <p className="text-[10px] text-red-400 ml-1">{last4Err || amtErr}</p>
+            )}
           </div>
-        ))}
+        );
+        })}
         
         {/* Balance Input - Fixed at bottom */}
-        <div className="flex gap-3 items-end pt-2 border-t border-white/5">
+        <div className="space-y-1 pt-2 border-t border-white/5">
+        <div className="flex gap-3 items-end">
            <div className="flex-1">
-             <div className="flex items-center gap-2 h-[42px] px-3 text-sm text-zinc-400">
+             <div className={`flex items-center gap-2 h-[42px] px-3 text-sm ${getErr('shipping_balance') ? 'text-red-400' : 'text-zinc-400'}`}>
                 <Wallet size={16} />
                 <span className="font-medium">Account Balance</span>
              </div>
            </div>
            <div className="flex-1 space-y-1">
               <div className="relative group">
-                <div className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500 pointer-events-none">
+                <div className={`absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none ${getErr('shipping_balance') ? 'text-red-400' : 'text-zinc-500'}`}>
                   $
                 </div>
                 <input
@@ -574,13 +788,17 @@ const ShippingEditor = ({
                   value={data.balance}
                   onChange={(e) => updateBalance(e.target.value)}
                   onFocus={(e) => e.target.select()}
-                  className="w-full bg-black/40 border border-white/10 rounded-xl py-2 pl-7 pr-3 text-sm text-zinc-200 placeholder-zinc-700 focus:outline-none focus:border-white/20 focus:bg-white/5 transition-all font-mono"
+                  className={`w-full bg-black/40 border rounded-xl py-2 pl-7 pr-3 text-sm text-zinc-200 placeholder-zinc-700 focus:outline-none focus:bg-white/5 transition-all font-mono ${
+                    getErr('shipping_balance') ? 'border-red-500/50 focus:border-red-500/70' : 'border-white/10 focus:border-white/20'
+                  }`}
                   placeholder="0.00"
                 />
               </div>
            </div>
            {/* Spacer to align with remove button column */}
            <div className="w-[42px]"></div> 
+        </div>
+        {getErr('shipping_balance') && <p className="text-[10px] text-red-400 ml-1">{getErr('shipping_balance')}</p>}
         </div>
       </div>
       
@@ -596,13 +814,16 @@ const PayoutEditor = ({
     data, 
     onChange,
     availableAccounts,
-    onCreateAccount
+    onCreateAccount,
+    errors = []
   }: { 
     data: PayoutBreakdown, 
     onChange: (newBreakdown: PayoutBreakdown) => void,
     availableAccounts: {id: string, name: string}[],
-    onCreateAccount: () => void
+    onCreateAccount: () => void,
+    errors?: ValidationError[]
   }) => {
+    const getErr = (field: string) => errors.find(e => e.field === field)?.message;
     
     // Safety check for initialization
     const accounts = data?.accounts || [];
@@ -661,24 +882,29 @@ const PayoutEditor = ({
             {accounts.length === 0 && (
                 <div className="text-center py-4 text-xs text-zinc-600 italic">No accounts added yet. Add one to set the weekly payout.</div>
             )}
-          {accounts.map((account) => (
-            <div key={account.id} className="flex gap-3 items-end animate-in fade-in slide-in-from-top-2">
+          {accounts.map((account, index) => {
+            const nameErr = getErr(`payout_${index}_name`);
+            const amtErr = getErr(`payout_${index}_amount`);
+            return (
+            <div key={account.id} className="space-y-1 animate-in fade-in slide-in-from-top-2">
+              <div className="flex gap-3 items-end">
               <div className="flex-1 space-y-1">
-                <label className="text-[10px] text-zinc-500 ml-1">Account Name</label>
+                <label className={`text-[10px] ml-1 ${nameErr ? 'text-red-400' : 'text-zinc-500'}`}>Account Name</label>
                 <div className="relative group">
-                  <div className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500 pointer-events-none">
+                  <div className={`absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none ${nameErr ? 'text-red-400' : 'text-zinc-500'}`}>
                     <Building2 size={14} />
                   </div>
                   <select
                     value={account.name}
                     onChange={(e) => updateAccount(account.id, 'name', e.target.value)}
-                    className="w-full bg-black/40 border border-white/10 rounded-xl py-2 pl-9 pr-3 text-sm text-zinc-200 focus:outline-none focus:border-white/20 focus:bg-white/5 transition-all appearance-none"
+                    className={`w-full bg-black/40 border rounded-xl py-2 pl-9 pr-3 text-sm text-zinc-200 focus:outline-none focus:bg-white/5 transition-all appearance-none ${
+                      nameErr ? 'border-red-500/50 focus:border-red-500/70' : 'border-white/10 focus:border-white/20'
+                    }`}
                   >
                     <option value="" disabled className="text-zinc-600">Select Account</option>
                     {availableAccounts.map(opt => (
                         <option key={opt.id} value={opt.name} className="bg-zinc-900 text-zinc-200">{opt.name}</option>
                     ))}
-                    {/* Fallback for existing data that might not be in DB yet or legacy */}
                     {account.name && !availableAccounts.find(a => a.name === account.name) && (
                         <option value={account.name} className="bg-zinc-900 text-zinc-200">{account.name}</option>
                     )}
@@ -689,9 +915,9 @@ const PayoutEditor = ({
                 </div>
               </div>
               <div className="flex-1 space-y-1">
-                <label className="text-[10px] text-zinc-500 ml-1">Amount</label>
+                <label className={`text-[10px] ml-1 ${amtErr ? 'text-red-400' : 'text-zinc-500'}`}>Amount</label>
                 <div className="relative group">
-                  <div className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500 pointer-events-none">
+                  <div className={`absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none ${amtErr ? 'text-red-400' : 'text-zinc-500'}`}>
                     $
                   </div>
                   <input
@@ -700,7 +926,9 @@ const PayoutEditor = ({
                     value={account.amount}
                     onChange={(e) => updateAccount(account.id, 'amount', e.target.value)}
                     onFocus={(e) => e.target.select()}
-                    className="w-full bg-black/40 border border-white/10 rounded-xl py-2 pl-7 pr-3 text-sm text-zinc-200 placeholder-zinc-700 focus:outline-none focus:border-white/20 focus:bg-white/5 transition-all font-mono"
+                    className={`w-full bg-black/40 border rounded-xl py-2 pl-7 pr-3 text-sm text-zinc-200 placeholder-zinc-700 focus:outline-none focus:bg-white/5 transition-all font-mono ${
+                      amtErr ? 'border-red-500/50 focus:border-red-500/70' : 'border-white/10 focus:border-white/20'
+                    }`}
                     placeholder="0.00"
                   />
                 </div>
@@ -713,8 +941,13 @@ const PayoutEditor = ({
               >
                 <Trash2 size={16} />
               </button>
+              </div>
+              {(nameErr || amtErr) && (
+                <p className="text-[10px] text-red-400 ml-1">{nameErr || amtErr}</p>
+              )}
             </div>
-          ))}
+          );
+          })}
         </div>
         
         <div className="mt-3 pt-2 border-t border-white/5 flex justify-between items-center">
@@ -731,17 +964,19 @@ const InputGroup = ({
   label, 
   value, 
   onChange, 
-  icon 
+  icon,
+  error
 }: { 
   label: string, 
   value: number, 
   onChange: (val: string) => void,
-  icon: React.ReactNode 
+  icon: React.ReactNode,
+  error?: string
 }) => (
   <div className="space-y-1.5">
-    <label className="text-xs text-zinc-500 font-medium ml-1">{label}</label>
+    <label className={`text-xs font-medium ml-1 ${error ? 'text-red-400' : 'text-zinc-500'}`}>{label}</label>
     <div className="relative group">
-      <div className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500 group-focus-within:text-white transition-colors pointer-events-none">
+      <div className={`absolute left-3 top-1/2 -translate-y-1/2 transition-colors pointer-events-none ${error ? 'text-red-400' : 'text-zinc-500 group-focus-within:text-white'}`}>
         {typeof icon === 'string' ? <span className="font-mono">{icon}</span> : icon}
       </div>
       <input
@@ -750,9 +985,14 @@ const InputGroup = ({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         onFocus={(e) => e.target.select()}
-        className="w-full bg-black/40 border border-white/10 rounded-xl py-2.5 pl-9 pr-3 text-sm text-zinc-200 placeholder-zinc-700 focus:outline-none focus:border-white/20 focus:bg-white/5 focus:ring-1 focus:ring-white/10 transition-all font-mono"
+        className={`w-full bg-black/40 border rounded-xl py-2.5 pl-9 pr-3 text-sm text-zinc-200 placeholder-zinc-700 focus:outline-none focus:bg-white/5 focus:ring-1 transition-all font-mono ${
+          error 
+            ? 'border-red-500/50 focus:border-red-500/70 focus:ring-red-500/20' 
+            : 'border-white/10 focus:border-white/20 focus:ring-white/10'
+        }`}
         placeholder="0.00"
       />
     </div>
+    {error && <p className="text-[10px] text-red-400 ml-1">{error}</p>}
   </div>
 );
