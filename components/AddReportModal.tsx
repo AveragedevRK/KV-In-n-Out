@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { X, Save, Wallet, CreditCard, LayoutDashboard, Plus, Trash2, Calendar, AlertTriangle, Building2, Lock, CheckCircle2, ShieldAlert, Info } from 'lucide-react';
+import { X, Save, Wallet, CreditCard, LayoutDashboard, Plus, Trash2, Calendar, AlertTriangle, Building2, Lock, CheckCircle2, ShieldAlert, Info, RotateCcw } from 'lucide-react';
 import { FinancialData, ShippingBreakdown, PayoutBreakdown } from '../types';
 import { db } from '../firebase';
 import { collection, addDoc, getDocs, onSnapshot, query, orderBy } from 'firebase/firestore';
@@ -131,27 +131,32 @@ export const AddReportModal: React.FC<AddReportModalProps> = ({
     }
   }, [formData, isOpen]);
 
-  // Auto-calculate Daily Earning whenever Date or Payout Total changes
-  useEffect(() => {
-    if (isOpen && formData.date && formData.payoutBreakdown) {
-        const date = new Date(formData.date);
-        let dayIndex = date.getDay(); // 0=Sun, 1=Mon...
-        if (dayIndex === 0) dayIndex = 7; // Treat Sunday as 7th day
-        
-        // Logic: Wednesday (3) -> 2 days passed. Mon(1) -> 0 days passed (use 1 as min divisor).
-        // Divisor = DayIndex - 1. 
-        const daysPassed = Math.max(1, dayIndex - 1);
-        
-        const calculatedDaily = formData.payoutBreakdown.total / daysPassed;
-        
-        if (formData.expectedDailyEarning !== calculatedDaily) {
-            setFormData(prev => ({
-                ...prev,
-                expectedDailyEarning: calculatedDaily
-            }));
-        }
-    }
-  }, [formData.date, formData.payoutBreakdown, isOpen]);
+  // Default values for reset
+  const getDefaultFormData = useCallback((): FinancialData => ({
+    date: new Date().toISOString().split('T')[0],
+    sales: 0,
+    sellingFee: 0,
+    cogs: 0,
+    shipping: 0,
+    dailyInvestment: 0,
+    expectedDailyEarning: 0,
+    expectedWeeklyPayout: 0,
+    previousWeeksPayout: 0,
+    shippingBreakdown: { cards: [], balance: 0 },
+    payoutBreakdown: { accounts: [], total: 0 }
+  }), []);
+
+  // Reset form to defaults (does NOT affect database)
+  const handleReset = () => {
+    const defaults = getDefaultFormData();
+    // Keep the current date selected
+    defaults.date = formData.date;
+    setFormData(defaults);
+    localStorage.removeItem(LOCAL_STORAGE_KEY);
+    setErrors([]);
+    setWarnings([]);
+    setHasAttemptedSubmit(false);
+  };
 
   const handleChange = (field: keyof FinancialData, value: string) => {
     setFormData(prev => ({
@@ -204,6 +209,7 @@ export const AddReportModal: React.FC<AddReportModalProps> = ({
       { key: 'cogs', label: 'COGS' },
       { key: 'shipping', label: 'Shipping' },
       { key: 'dailyInvestment', label: 'Daily Investment' },
+      { key: 'expectedDailyEarning', label: 'Expected Daily Earning' },
       { key: 'expectedWeeklyPayout', label: 'Weekly Payout' },
       { key: 'previousWeeksPayout', label: "Previous Week's Payout" },
     ];
@@ -504,49 +510,49 @@ export const AddReportModal: React.FC<AddReportModalProps> = ({
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-              {/* Daily Earning is now Read Only / Calculated */}
-              <div className="space-y-1.5 opacity-80">
-                <label className="text-xs text-emerald-400 font-medium ml-1">Daily Earning (Calculated)</label>
-                <div className="relative group">
-                    <div className="absolute left-3 top-1/2 -translate-y-1/2 text-emerald-500 pointer-events-none">
-                    $
-                    </div>
-                    <input
-                    type="number"
-                    value={formData.expectedDailyEarning}
-                    readOnly
-                    className="w-full bg-emerald-900/10 border border-emerald-500/20 rounded-xl py-2.5 pl-9 pr-3 text-sm text-emerald-200 focus:outline-none font-mono cursor-not-allowed"
-                    />
-                </div>
-              </div>
-
+              <InputGroup label="Expected Daily Earning" value={formData.expectedDailyEarning} onChange={(v) => handleChange('expectedDailyEarning', v)} icon="$" error={getFieldError('expectedDailyEarning')} />
               <InputGroup label="Previous Week's Payout" value={formData.previousWeeksPayout} onChange={(v) => handleChange('previousWeeksPayout', v)} icon="$" error={getFieldError('previousWeeksPayout')} />
             </div>
           </section>
 
-          <div className="pt-6 border-t border-white/10 flex justify-end gap-3 sticky bottom-0 bg-zinc-900/95 py-4 z-20 -mx-2 px-2 backdrop-blur-xl">
+          <div className="pt-6 border-t border-white/10 flex justify-between sticky bottom-0 bg-zinc-900/95 py-4 z-20 -mx-2 px-2 backdrop-blur-xl">
+             {/* Left side - Reset */}
              <button 
                type="button" 
-               onClick={onClose}
-               className="px-6 py-2.5 rounded-xl text-sm font-medium text-zinc-300 hover:text-white hover:bg-white/5 transition-colors"
+               onClick={handleReset}
+               className="px-4 py-2.5 rounded-xl text-sm font-medium text-amber-400 hover:text-amber-300 hover:bg-amber-500/10 border border-amber-500/20 transition-colors flex items-center gap-2"
                disabled={isSaving}
+               title="Reset all fields to default (does not affect saved data)"
              >
-               Cancel
+               <RotateCcw size={14} />
+               Reset
              </button>
-             <button 
-               type="submit"
-               disabled={isSaving || (hasAttemptedSubmit && errors.length > 0)}
-               className={`px-6 py-2.5 rounded-xl text-sm font-medium transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed ${
-                 hasAttemptedSubmit && errors.length > 0
-                   ? 'bg-zinc-700 text-zinc-400 cursor-not-allowed'
-                   : 'bg-white text-black hover:bg-zinc-200 shadow-[0_0_20px_rgba(255,255,255,0.1)]'
-               }`}
-             >
-               {isSaving ? (
-                 <span className="w-4 h-4 border-2 border-zinc-400 border-t-zinc-800 rounded-full animate-spin"></span>
-               ) : <Save size={16} />}
-               {isSaving ? 'Saving...' : 'Save Changes'}
-             </button>
+             
+             {/* Right side - Cancel & Save */}
+             <div className="flex gap-3">
+               <button 
+                 type="button" 
+                 onClick={onClose}
+                 className="px-6 py-2.5 rounded-xl text-sm font-medium text-zinc-300 hover:text-white hover:bg-white/5 transition-colors"
+                 disabled={isSaving}
+               >
+                 Cancel
+               </button>
+               <button 
+                 type="submit"
+                 disabled={isSaving || (hasAttemptedSubmit && errors.length > 0)}
+                 className={`px-6 py-2.5 rounded-xl text-sm font-medium transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed ${
+                   hasAttemptedSubmit && errors.length > 0
+                     ? 'bg-zinc-700 text-zinc-400 cursor-not-allowed'
+                     : 'bg-white text-black hover:bg-zinc-200 shadow-[0_0_20px_rgba(255,255,255,0.1)]'
+                 }`}
+               >
+                 {isSaving ? (
+                   <span className="w-4 h-4 border-2 border-zinc-400 border-t-zinc-800 rounded-full animate-spin"></span>
+                 ) : <Save size={16} />}
+                 {isSaving ? 'Saving...' : 'Save Changes'}
+               </button>
+             </div>
           </div>
 
         </form>
