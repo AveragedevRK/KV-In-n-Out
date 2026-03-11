@@ -9,9 +9,8 @@ import {
   PieChart,
   Activity,
   Calendar,
+  CalendarRange,
   Plus,
-  ChevronDown,
-  History,
   Copy,
   Check,
   Building2
@@ -19,6 +18,7 @@ import {
 import { MetricCard, SubItem } from './components/MetricCard';
 import { Orb } from './components/Orb';
 import { AddReportModal } from './components/AddReportModal';
+import { DateRangeSelector, DateRange } from './components/DateRangeSelector';
 import { FinancialData, ShippingBreakdown, PayoutBreakdown } from './types';
 import { db } from './firebase';
 import { collection, doc, setDoc, getDocs, getDoc, serverTimestamp } from 'firebase/firestore';
@@ -40,13 +40,18 @@ const App: React.FC = () => {
   // Store reports indexed by date string (YYYY-MM-DD)
   const [reports, setReports] = useState<Record<string, FinancialData>>({});
   
-  // State for which date is currently selected
-  const [selectedDate, setSelectedDate] = useState<string>(getTodayString());
+  // Date range state
+  const [dateRange, setDateRange] = useState<DateRange>({
+    preset: 'single',
+    startDate: getTodayString(),
+    endDate: getTodayString(),
+  });
   
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [isCopying, setIsCopying] = useState(false);
   const [copySuccess, setCopySuccess] = useState(false);
+
+  const isRangeMode = dateRange.preset !== 'single';
 
   // Fetch all data from Firebase on mount to populate history
   useEffect(() => {
@@ -79,7 +84,7 @@ const App: React.FC = () => {
           // Sort dates descending to find the latest saved report
           const sortedDates = dateKeys.sort((a, b) => new Date(b).getTime() - new Date(a).getTime());
           // Default to the most recent report available
-          setSelectedDate(sortedDates[0]);
+          setDateRange({ preset: 'single', startDate: sortedDates[0], endDate: sortedDates[0] });
         }
       } catch (error) {
         console.error("Error fetching history: ", error);
@@ -89,8 +94,11 @@ const App: React.FC = () => {
     fetchAllData();
   }, []);
 
-  // Fetch specific document when selectedDate changes
+  // Fetch specific document when in single-date mode and the date changes
   useEffect(() => {
+    if (isRangeMode) return;
+    const selectedDate = dateRange.startDate;
+    
     const fetchSelectedReport = async () => {
       if (!selectedDate) return;
 
@@ -118,9 +126,6 @@ const App: React.FC = () => {
             ...prev,
             [selectedDate]: loadedData
           }));
-          console.log("Loaded successfully");
-        } else {
-          console.log("No data found for date");
         }
       } catch (error) {
         console.error("Error loading report:", error);
@@ -128,27 +133,59 @@ const App: React.FC = () => {
     };
 
     fetchSelectedReport();
-  }, [selectedDate]);
+  }, [dateRange.startDate, isRangeMode]);
 
   const availableDates = useMemo(() => {
     return Object.keys(reports).sort((a, b) => new Date(b).getTime() - new Date(a).getTime());
   }, [reports]);
 
-  const currentData = useMemo(() => {
+  // Get reports within the selected date range
+  const rangeReports = useMemo(() => {
+    if (!isRangeMode) return [];
+    return Object.values(reports).filter(r => r.date >= dateRange.startDate && r.date <= dateRange.endDate);
+  }, [reports, dateRange, isRangeMode]);
+
+  // Aggregated data for range mode
+  const aggregatedData = useMemo((): FinancialData => {
+    if (rangeReports.length === 0) {
+      return {
+        date: dateRange.startDate,
+        sales: 0, sellingFee: 0, cogs: 0, shipping: 0,
+        dailyInvestment: 0, expectedDailyEarning: 0,
+        expectedWeeklyPayout: 0, previousWeeksPayout: 0,
+        shippingBreakdown: { cards: [], balance: 0 },
+        payoutBreakdown: { accounts: [], total: 0 },
+      };
+    }
+    return {
+      date: dateRange.startDate,
+      sales: rangeReports.reduce((s, r) => s + r.sales, 0),
+      sellingFee: rangeReports.reduce((s, r) => s + r.sellingFee, 0),
+      cogs: rangeReports.reduce((s, r) => s + r.cogs, 0),
+      shipping: rangeReports.reduce((s, r) => s + r.shipping, 0),
+      dailyInvestment: rangeReports.reduce((s, r) => s + r.dailyInvestment, 0),
+      expectedDailyEarning: rangeReports.reduce((s, r) => s + r.expectedDailyEarning, 0),
+      expectedWeeklyPayout: rangeReports.reduce((s, r) => s + r.expectedWeeklyPayout, 0),
+      previousWeeksPayout: rangeReports.reduce((s, r) => s + r.previousWeeksPayout, 0),
+      shippingBreakdown: { cards: [], balance: 0 },
+      payoutBreakdown: { accounts: [], total: 0 },
+    };
+  }, [rangeReports, dateRange.startDate]);
+
+  // Single-day data fallback
+  const singleData = useMemo(() => {
+    const selectedDate = dateRange.startDate;
     return reports[selectedDate] || {
       date: selectedDate,
-      sales: 0,
-      sellingFee: 0,
-      cogs: 0,
-      shipping: 0,
-      dailyInvestment: 0,
-      expectedDailyEarning: 0,
-      expectedWeeklyPayout: 0,
-      previousWeeksPayout: 0,
+      sales: 0, sellingFee: 0, cogs: 0, shipping: 0,
+      dailyInvestment: 0, expectedDailyEarning: 0,
+      expectedWeeklyPayout: 0, previousWeeksPayout: 0,
       shippingBreakdown: { cards: [], balance: 0 },
       payoutBreakdown: { accounts: [], total: 0 }
     };
-  }, [reports, selectedDate]);
+  }, [reports, dateRange.startDate]);
+
+  const currentData = isRangeMode ? aggregatedData : singleData;
 
   const profit = currentData.sales - (currentData.sellingFee + currentData.cogs + currentData.shipping);
   const totalDailyExpenditure = currentData.dailyInvestment + currentData.shipping;
@@ -161,7 +198,7 @@ const App: React.FC = () => {
       ...prev,
       [newData.date]: newData
     }));
-    setSelectedDate(newData.date);
+    setDateRange({ preset: 'single', startDate: newData.date, endDate: newData.date });
 
     try {
       await setDoc(doc(db, "dailyReports", newData.date), {
@@ -313,55 +350,17 @@ const App: React.FC = () => {
               </span>
             </button>
 
-            {/* Date Selector */}
-            <div className="relative">
-              <button 
-                onClick={() => setIsHistoryOpen(!isHistoryOpen)}
-                className="flex items-center gap-2 px-3 md:px-4 py-2 md:py-2.5 rounded-full bg-white/5 border border-white/10 hover:bg-white/10 transition-all backdrop-blur-md"
-              >
-                <History size={14} className="text-zinc-400 md:w-4 md:h-4" />
-                <span className="text-xs md:text-sm font-medium text-zinc-200">{formatDateDisplay(selectedDate)}</span>
-                <ChevronDown size={12} className={`text-zinc-500 transition-transform md:w-3.5 md:h-3.5 ${isHistoryOpen ? 'rotate-180' : ''}`} />
-              </button>
-
-              {isHistoryOpen && (
-                <>
-                  <div className="fixed inset-0 z-40" onClick={() => setIsHistoryOpen(false)}></div>
-                  <div className="absolute top-full right-0 mt-2 w-56 max-h-64 overflow-y-auto bg-zinc-900/95 border border-white/10 rounded-2xl shadow-2xl backdrop-blur-xl z-50 py-2 custom-scrollbar">
-                    <div className="px-3 py-2 text-xs font-semibold text-zinc-500 uppercase tracking-wider">Select Report Date</div>
-                    {availableDates.map(date => (
-                      <button
-                        key={date}
-                        onClick={() => {
-                          setSelectedDate(date);
-                          setIsHistoryOpen(false);
-                        }}
-                        className={`w-full text-left px-4 py-2.5 text-sm transition-colors flex items-center justify-between ${
-                          selectedDate === date 
-                            ? 'bg-emerald-500/10 text-emerald-400' 
-                            : 'text-zinc-300 hover:bg-white/5'
-                        }`}
-                      >
-                        <span>{formatDateDisplay(date)}</span>
-                        {selectedDate === date && <div className="w-1.5 h-1.5 rounded-full bg-emerald-400"></div>}
-                      </button>
-                    ))}
-                    {!reports[getTodayString()] && (
-                      <button
-                      onClick={() => {
-                        setSelectedDate(getTodayString());
-                        setIsHistoryOpen(false);
-                        setIsModalOpen(true);
-                      }}
-                      className="w-full text-left px-4 py-2.5 text-sm text-zinc-400 hover:text-white hover:bg-white/5 border-t border-white/5 mt-1"
-                    >
-                      + Create for Today
-                    </button>
-                    )}
-                  </div>
-                </>
-              )}
-            </div>
+            {/* Date Range Selector */}
+            <DateRangeSelector
+              dateRange={dateRange}
+              onDateRangeChange={setDateRange}
+              availableDates={availableDates}
+              hasTodayReport={!!reports[getTodayString()]}
+              onCreateToday={() => {
+                setDateRange({ preset: 'single', startDate: getTodayString(), endDate: getTodayString() });
+                setIsModalOpen(true);
+              }}
+            />
 
             {/* Add Report Button */}
             <button 
@@ -398,9 +397,12 @@ const App: React.FC = () => {
                   </div>
                   Operations P&L
               </h1>
-              <div className="self-start md:self-auto text-[10px] md:text-xs font-mono text-zinc-500 border border-white/5 rounded-full px-2 md:px-3 py-1 bg-black/20 flex items-center gap-1.5 md:gap-2">
-                <Calendar size={10} className="md:w-3 md:h-3" />
-                {formatDateDisplay(currentData.date)}
+              <div className={`self-start md:self-auto text-[10px] md:text-xs font-mono border rounded-full px-2 md:px-3 py-1 bg-black/20 flex items-center gap-1.5 md:gap-2 ${isRangeMode ? 'text-cyan-400 border-cyan-500/20' : 'text-zinc-500 border-white/5'}`}>
+                {isRangeMode ? <CalendarRange size={10} className="md:w-3 md:h-3" /> : <Calendar size={10} className="md:w-3 md:h-3" />}
+                {isRangeMode 
+                  ? `${formatDateDisplay(dateRange.startDate)} - ${formatDateDisplay(dateRange.endDate)} (${rangeReports.length} ${rangeReports.length === 1 ? 'report' : 'reports'})`
+                  : formatDateDisplay(currentData.date)
+                }
               </div>
             </div>
 
@@ -455,7 +457,7 @@ const App: React.FC = () => {
                   icon={Truck}
                   iconColor="text-zinc-400"
                   accentColor="bg-zinc-500"
-                  subItems={getShippingBreakdown(currentData.shippingBreakdown)}
+                  subItems={!isRangeMode ? getShippingBreakdown(currentData.shippingBreakdown) : undefined}
                 />
               </div>
 
@@ -465,7 +467,7 @@ const App: React.FC = () => {
               
               <div className="flex-1 transform transition-transform hover:scale-[1.02] md:hover:scale-105">
                 <MetricCard 
-                  label="Net Profit" 
+                  label={isRangeMode ? "Total Net Profit" : "Net Profit"}
                   amount={profit} 
                   icon={TrendingUp}
                   iconColor={profit >= 0 ? "text-emerald-300" : "text-rose-300"}
@@ -488,24 +490,24 @@ const App: React.FC = () => {
                 <div className="p-1.5 md:p-2 bg-rose-500/10 rounded-xl border border-rose-500/20 text-rose-300 shadow-[0_0_15px_rgba(244,63,94,0.1)]">
                   <PieChart size={16} className="md:w-5 md:h-5" />
                 </div>
-                <h2 className="text-lg md:text-xl font-light text-zinc-100">Daily Expenditure</h2>
+                <h2 className="text-lg md:text-xl font-light text-zinc-100">{isRangeMode ? 'Total Expenditure' : 'Daily Expenditure'}</h2>
               </div>
               
               <div className="relative z-10 space-y-3 md:space-y-4 flex-1">
                 <MetricCard 
-                  label="Investment" 
+                  label={isRangeMode ? "Total Investment" : "Investment"}
                   amount={currentData.dailyInvestment} 
                   icon={Wallet}
                   iconColor="text-rose-300/80"
                   accentColor="bg-rose-500" 
                 />
                 <MetricCard 
-                  label="Shipping" 
+                  label={isRangeMode ? "Total Shipping" : "Shipping"}
                   amount={currentData.shipping} 
                   icon={Truck}
                   iconColor="text-rose-300/80"
                   accentColor="bg-rose-500" 
-                  subItems={getShippingBreakdown(currentData.shippingBreakdown)}
+                  subItems={!isRangeMode ? getShippingBreakdown(currentData.shippingBreakdown) : undefined}
                 />
               </div>
               <div className="relative z-10 mt-4 md:mt-6 pt-3 md:pt-4 border-t border-white/10 flex justify-between items-center text-rose-200/80">
@@ -524,24 +526,24 @@ const App: React.FC = () => {
                 <div className="p-1.5 md:p-2 bg-emerald-500/10 rounded-xl border border-emerald-500/20 text-emerald-300 shadow-[0_0_15px_rgba(16,185,129,0.1)]">
                   <Calendar size={16} className="md:w-5 md:h-5" />
                 </div>
-                <h2 className="text-lg md:text-xl font-light text-zinc-100">Daily Earning</h2>
+                <h2 className="text-lg md:text-xl font-light text-zinc-100">{isRangeMode ? 'Total Earnings' : 'Daily Earning'}</h2>
               </div>
               
               <div className="relative z-10 space-y-3 md:space-y-4 flex-1">
                 <MetricCard 
-                  label="Expected Daily Earning" 
+                  label={isRangeMode ? "Total Daily Earnings" : "Expected Daily Earning"}
                   amount={currentData.expectedDailyEarning} 
                   icon={TrendingUp}
                   iconColor="text-emerald-300/80"
                   accentColor="bg-emerald-500" 
                 />
                 <MetricCard 
-                  label="Expected Weekly Payout" 
+                  label={isRangeMode ? "Total Weekly Payouts" : "Expected Weekly Payout"}
                   amount={currentData.expectedWeeklyPayout} 
                   icon={DollarSign}
                   iconColor="text-emerald-300/80"
                   accentColor="bg-emerald-500" 
-                  subItems={getPayoutBreakdown(currentData.payoutBreakdown)}
+                  subItems={!isRangeMode ? getPayoutBreakdown(currentData.payoutBreakdown) : undefined}
                 />
               </div>
               <div className="relative z-10 mt-4 md:mt-6 pt-3 md:pt-4 border-t border-white/10 flex justify-between items-center text-emerald-200/80">
@@ -572,7 +574,7 @@ const App: React.FC = () => {
         isOpen={isModalOpen}
         onClose={() => setIsModalOpen(false)}
         onSave={handleSaveReport}
-        initialData={currentData}
+        initialData={singleData}
       />
     </div>
   );
