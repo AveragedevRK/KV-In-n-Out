@@ -159,7 +159,11 @@ export const DateRangeSelector: React.FC<DateRangeSelectorProps> = ({
     <div className="relative" ref={dropdownRef}>
       {/* Trigger Button */}
       <button
-        onClick={() => { setIsOpen(!isOpen); setActiveView('presets'); }}
+        onClick={() => { 
+          setIsOpen(!isOpen); 
+          // If already in single mode, go straight to the date list
+          setActiveView(dateRange.preset === 'single' ? 'single-dates' : 'presets'); 
+        }}
         className={`flex items-center gap-2 px-3 md:px-4 py-2 md:py-2.5 rounded-full border transition-all backdrop-blur-md ${
           isRange
             ? 'bg-cyan-500/10 border-cyan-500/20 hover:bg-cyan-500/15'
@@ -212,17 +216,20 @@ export const DateRangeSelector: React.FC<DateRangeSelectorProps> = ({
           {/* Single Date Picker View */}
           {activeView === 'single-dates' && (
             <div className="py-2">
-              <div className="px-3 py-2 flex items-center gap-2">
-                <button
-                  onClick={() => setActiveView('presets')}
-                  className="text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
-                >
-                  {'<-'} Back
-                </button>
+              <div className="px-3 py-2 flex items-center justify-between">
                 <span className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wider">
                   Select Date
                 </span>
+                <button
+                  onClick={() => setActiveView('presets')}
+                  className="text-[10px] text-cyan-400 hover:text-cyan-300 transition-colors font-medium"
+                >
+                  Date Range
+                </button>
               </div>
+              {availableDates.length === 0 && (
+                <div className="px-4 py-3 text-xs text-zinc-500">No reports found.</div>
+              )}
               <div className="max-h-56 overflow-y-auto custom-scrollbar">
                 {availableDates.map(date => (
                   <button
